@@ -357,7 +357,7 @@ where
                 let _ = ongoing_requests
                     .remove(&request_id)
                     .unwrap()
-                    .send(result.map_err(RequestError::Request));
+                    .send(result.map_err(RequestError::Request)).await;
             }
 
             // Receive a response from the server about a subscription.

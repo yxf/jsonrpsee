@@ -1,0 +1,29 @@
+[package]
+name = "jsonrpsee-ipc"
+description = "IPC client and server for jsonrpsee"
+version = "1.0.0"
+authors = ["Seun Lanlege <seun@parity.io>"]
+license = "MIT"
+edition = "2018"
+
+[dependencies]
+jsonrpsee-core = { path = "../core" }
+jsonrpsee-server-utils = { path = "../server-utils" }
+
+async-std = "0.99.11"
+derive_more = "0.13.0"
+err-derive = "0.1.5"
+fnv = "1.0"
+futures = { version = "0.3", features = ["async-await"] }
+futures-timer = "0.3.0"
+lazy_static = "1.4.0"
+log = "0.4"
+serde = { version = "1.0.40", features = ["derive"] }
+serde_json = "1.0.40"
+tokio = { version = "0.2", features=["io-util", "uds"] }
+tokio-util = { version = "0.2.0", features=["codec"] }
+parity-tokio-ipc = {path="../../parity-tokio-ipc"}
+unicase = "2.0"
+
+[dev-dependencies]
+rand = "0.7"
