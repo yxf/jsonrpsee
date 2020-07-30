@@ -25,7 +25,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::common::{self, JsonValue};
-use crate::raw::{client::RawClientEvent, RawClient, RawClientRequestId};
+use crate::raw::{client::RawClientEvent, RawClient, RawClientRequestId, RawClientError};
 use crate::transport::TransportClient;
 
 use futures::{
@@ -35,6 +35,7 @@ use futures::{
     prelude::*,
 };
 use std::{collections::HashMap, error, io, marker::PhantomData};
+use futures::executor::{ ThreadPoolBuilder };
 
 /// Client that can be cloned.
 ///
@@ -73,6 +74,7 @@ pub enum RequestError {
 }
 
 /// Message that the [`Client`] can send to the background task.
+#[derive(Debug)]
 enum FrontToBack {
     /// Send a one-shot notification to the server. The server doesn't give back any feedback.
     Notification {
@@ -123,9 +125,10 @@ impl Client {
         R::Error: error::Error + Send + Sync,
     {
         let (to_back, from_front) = mpsc::channel(16);
-        async_std::task::spawn(async move {
-            background_task(client, from_front).await;
-        });
+
+        let pool = ThreadPoolBuilder::new().pool_size(1).name_prefix("jsonrpsee").create().unwrap();
+        pool.spawn_ok(background_task(client, from_front));
+
         Client { to_back }
     }
 
@@ -155,15 +158,15 @@ impl Client {
         Ret: common::DeserializeOwned,
     {
         let (send_back_tx, send_back_rx) = oneshot::channel();
+        let m = method.into();
         let _ = self
             .to_back
             .clone()
             .send(FrontToBack::StartRequest {
-                method: method.into(),
+                method: m,
                 params: params.into(),
                 send_back: send_back_tx,
-            })
-            .await;
+            }).await;
 
         // TODO: send a `ChannelClosed` message if we close the channel unexpectedly
 
@@ -353,10 +356,8 @@ where
 
             // Received a response to a request from the server.
             Either::Right(Ok(RawClientEvent::Response { request_id, result })) => {
-                let _ = ongoing_requests
-                    .remove(&request_id)
-                    .unwrap()
-                    .send(result.map_err(RequestError::Request));
+                let tx = ongoing_requests.remove(&request_id).unwrap();
+                tx.send(result.map_err(RequestError::Request)).unwrap();
             }
 
             // Receive a response from the server about a subscription.
@@ -404,6 +405,13 @@ where
             Either::Right(Err(e)) => {
                 // TODO: https://github.com/paritytech/jsonrpsee/issues/67
                 log::error!("Client Error: {:?}", e);
+
+                if let RawClientError::Inner(x) = e {
+                    let err = format!("{:?}", x);
+                    if err == "WsDisconnected" {
+                        return
+                    }
+                }
             }
         }
     }

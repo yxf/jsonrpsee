@@ -34,14 +34,24 @@ use soketto::handshake::client::{Client as WsRawClient, ServerResponse};
 use std::{borrow::Cow, fmt, io, net::SocketAddr, pin::Pin, time::Duration};
 use thiserror::Error;
 
+use std::thread;
+// use std::sync::mpsc::{ channel, Sender, Receiver, TryRecvError };
+
+use futures::channel::mpsc::{ unbounded, UnboundedSender, UnboundedReceiver };
+use futures::executor::{ ThreadPool, ThreadPoolBuilder };
+
+
 type TlsOrPlain = crate::transport::ws::stream::EitherStream<TcpStream, TlsStream<TcpStream>>;
 
 /// Implementation of a raw client for WebSockets requests.
 pub struct WsTransportClient {
     /// Sending half of a TCP/IP connection wrapped around a WebSocket encoder.
-    sender: connection::Sender<TlsOrPlain>,
+    // sender: connection::Sender<TlsOrPlain>,
     /// Receiving half of a TCP/IP connection wrapped around a WebSocket decoder.
-    receiver: connection::Receiver<TlsOrPlain>,
+    // receiver: connection::Receiver<TlsOrPlain>,
+
+    req_tx: UnboundedSender<common::Request>,
+    res_rx: UnboundedReceiver<common::Response>,
 }
 
 /// Builder for a [`WsTransportClient`].
@@ -137,6 +147,12 @@ pub enum WsConnecError {
     /// Failed to parse the JSON returned by the server into a JSON-RPC response.
     #[error("error while parsing the response body")]
     ParseError(#[source] serde_json::error::Error),
+
+    #[error("Retry when trying to receive data timeout")]
+    TimeoutRetry,
+
+    #[error("WebSocket disconnected")]
+    WsDisconnected
 }
 
 impl WsTransportClient {
@@ -208,9 +224,7 @@ impl TransportClient for WsTransportClient {
         request: common::Request,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
         Box::pin(async move {
-            let request = common::to_vec(&request).map_err(WsConnecError::Serialization)?;
-            self.sender.send_binary(request).await?;
-            self.sender.flush().await?;
+            let _ = self.req_tx.unbounded_send(request);
             Ok(())
         })
     }
@@ -219,10 +233,11 @@ impl TransportClient for WsTransportClient {
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<common::Response, Self::Error>> + Send + 'a>> {
         Box::pin(async move {
-            let mut message = Vec::new();
-            self.receiver.receive_data(&mut message).await?;
-            let response = common::from_slice(&message).map_err(WsConnecError::ParseError)?;
-            Ok(response)
+            if let Some(response) = self.res_rx.next().await {
+                Ok(response)
+            } else {
+                Err(WsConnecError::WsDisconnected)
+            }
         })
     }
 }
@@ -297,8 +312,40 @@ impl<'a> WsTransportClientBuilder<'a> {
         }
 
         // If the handshake succeeded, return.
-        let (sender, receiver) = client.into_builder().finish();
-        Ok(WsTransportClient { sender, receiver })
+        let (mut sender, mut receiver) = client.into_builder().finish();
+
+        let (req_tx, mut req_rx) = unbounded::<common::Request>();
+        let (res_tx, res_rx) = unbounded::<common::Response>();
+
+        let pool = ThreadPoolBuilder::new().pool_size(2).name_prefix("transport").create()?;
+
+        // send loop
+        pool.spawn_ok(async move {
+            loop {
+                if let Some(request) = req_rx.next().await {
+                    if let Ok(bytes) = common::to_vec(&request) {
+                        let _ = sender.send_binary(bytes).await;
+                    }
+                } else {
+                    break
+                }
+            }
+        });
+
+        // receive loop
+        pool.spawn_ok(async move {
+            loop {
+                let mut message = Vec::new();
+                if let Err(_) = receiver.receive(&mut message).await {
+                    break;
+                }
+                if let Ok(response) = common::from_slice(&message) {
+                    let _ = res_tx.unbounded_send(response);
+                }
+            }
+        });
+
+        Ok(WsTransportClient { req_tx, res_rx })
     }
 }
 
