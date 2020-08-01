@@ -34,11 +34,8 @@ use soketto::handshake::client::{Client as WsRawClient, ServerResponse};
 use std::{borrow::Cow, fmt, io, net::SocketAddr, pin::Pin, time::Duration};
 use thiserror::Error;
 
-use std::thread;
-// use std::sync::mpsc::{ channel, Sender, Receiver, TryRecvError };
-
 use futures::channel::mpsc::{ unbounded, UnboundedSender, UnboundedReceiver };
-use futures::executor::{ ThreadPool, ThreadPoolBuilder };
+use futures::executor::ThreadPoolBuilder;
 
 
 type TlsOrPlain = crate::transport::ws::stream::EitherStream<TcpStream, TlsStream<TcpStream>>;
